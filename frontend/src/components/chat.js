@@ -1,19 +1,63 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
 import {
   createSession,
   getSessionMessages,
   getSessions,
   sendMessage,
+  updateSessionTitle,
 } from '../api';
 import '../App.css';
 
-const Chat = () => {
+const Chat = ({ onLogout }) => {
+  const { username: urlUsername } = useParams();
+  const navigate = useNavigate();
+  const storedUsername = localStorage.getItem('username');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [loadingSessions, setLoadingSessions] = useState(true);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editTitle, setEditTitle] = useState('');
+  const editInputRef = useRef(null);
+
+  useEffect(() => {
+    if (storedUsername && urlUsername !== storedUsername) {
+      navigate(`/${storedUsername}`, { replace: true });
+    }
+  }, [urlUsername, storedUsername, navigate]);
+
+  const startEditing = (sessionId, currentTitle) => {
+    setEditingSessionId(sessionId);
+    setEditTitle(currentTitle);
+    setTimeout(() => editInputRef.current?.focus(), 0);
+  };
+
+  const saveTitle = async () => {
+    const id = editingSessionId;
+    if (!id) return;
+    const newTitle = editTitle.trim() || 'New conversation';
+    try {
+      await updateSessionTitle(id, newTitle);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, title: newTitle } : s))
+      );
+    } catch (err) {
+      console.error('Failed to update title', err);
+    }
+    setEditingSessionId(null);
+    setEditTitle('');
+  };
+
+  const cancelEditing = () => {
+    setEditingSessionId(null);
+    setEditTitle('');
+  };
 
   const loadSessions = async () => {
     try {
@@ -56,6 +100,15 @@ const Chat = () => {
     const userMessage = input;
     setInput('');
     setLoading(true);
+
+    const optimisticMsg = {
+      id: `temp-${Date.now()}`,
+      role: 'user',
+      content: userMessage,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+
     try {
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -86,8 +139,8 @@ const Chat = () => {
   };
 
   const logout = () => {
-    localStorage.removeItem('access_token');
-    window.location.reload();
+    onLogout();
+    navigate('/', { replace: true });
   };
 
   const sessionItems = useMemo(() => {
@@ -127,9 +180,29 @@ const Chat = () => {
                 key={item.id}
                 className={`sidebar-item ${item.id === activeSessionId ? 'active' : ''}`}
                 type="button"
-                onClick={() => setActiveSessionId(item.id)}
+                onClick={() => {
+                  if (editingSessionId !== item.id) {
+                    setActiveSessionId(item.id);
+                  }
+                }}
+                onDoubleClick={() => startEditing(item.id, item.title)}
               >
-                <div className="sidebar-item-title">{item.title}</div>
+                {editingSessionId === item.id && editingSessionId !== activeSessionId ? (
+                  <input
+                    ref={editInputRef}
+                    className="sidebar-item-edit-input"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    onBlur={saveTitle}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') saveTitle();
+                      if (e.key === 'Escape') cancelEditing();
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <div className="sidebar-item-title">{item.title}</div>
+                )}
                 <div className="sidebar-item-meta">{item.time} · {item.count} msgs</div>
               </button>
             ))}
@@ -140,9 +213,28 @@ const Chat = () => {
           <div className="chat-header">
             <div className="brand">
               <h1>SPM Chat</h1>
-              <span>{activeSession ? activeSession.title : 'Start a new conversation'}</span>
+              {activeSession && editingSessionId === activeSession.id ? (
+                <input
+                  className="header-edit-input"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  onBlur={saveTitle}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveTitle();
+                    if (e.key === 'Escape') cancelEditing();
+                  }}
+                  autoFocus
+                />
+              ) : (
+                <span
+                  onDoubleClick={() => activeSession && startEditing(activeSession.id, activeSession.title)}
+                >
+                  {activeSession ? activeSession.title : 'Start a new conversation'}
+                </span>
+              )}
             </div>
             <div className="header-actions">
+              <span className="user-badge">{urlUsername}</span>
               <button onClick={logout} className="logout-button">Logout</button>
             </div>
           </div>
@@ -153,7 +245,15 @@ const Chat = () => {
                 className={`message ${msg.role === 'user' ? 'message-user' : 'message-assistant'}`}
               >
                 <div className="message-role">{msg.role === 'user' ? 'You' : 'Assistant'}</div>
-                <div className="message-content">{msg.content}</div>
+                <div className="message-content">
+                  {msg.role === 'assistant' ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  ) : (
+                    msg.content
+                  )}
+                </div>
                 <div className="message-time">
                   {new Date(msg.timestamp).toLocaleTimeString()}
                 </div>

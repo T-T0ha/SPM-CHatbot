@@ -41,6 +41,9 @@ class ChatHistoryResponse(BaseModel):
 class ChatSessionCreate(BaseModel):
     title: Optional[str] = None
 
+class ChatSessionUpdate(BaseModel):
+    title: str
+
 class ChatSessionResponse(BaseModel):
     id: int
     title: str
@@ -51,3 +54,8 @@ class ChatSessionResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[int] = None
+
+class ChatResponse(BaseModel):
+    response: str
+    session_id: int
+    summary_updated: bool = False

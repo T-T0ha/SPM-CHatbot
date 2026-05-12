@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
@@ -11,17 +11,25 @@ from schemas import (
     ChatRequest,
     ChatHistoryResponse,
     ChatSessionCreate,
+    ChatSessionUpdate,
     ChatSessionResponse,
 )
+from context_builder import build_context
+from llm import call_ollama, OllamaUnavailableError
 from datetime import timedelta
 from typing import List
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 app = FastAPI()
 
 # CORS for React frontend (running on port 3000)
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,26 +41,45 @@ def startup():
     init_db()
 
 # ---------- AUTH ENDPOINTS ----------
-@app.post("/api/register", response_model=Token)
+@app.post("/api/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.username == user.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already registered")
     hashed = get_password_hash(user.password)
-    new_user = User(username=user.username, hashed_password=hashed)
+    new_user = User(username=user.username, hashed_password=hashed, role="user")
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    access_token = create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer"}
+    access_token = create_access_token(data={"sub": user.username, "role": "user"})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username,
+        "role": "user",
+    }
 
-@app.post("/api/login", response_model=Token)
+@app.post("/api/login")
 def login(user: UserLogin, db: Session = Depends(get_db)):
     db_user = authenticate_user(db, user.username, user.password)
     if not db_user:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    access_token = create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer"}
+    access_token = create_access_token(data={"sub": user.username, "role": db_user.role})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username,
+        "role": db_user.role,
+    }
+
+# ---------- USER ENDPOINTS ----------
+@app.get("/api/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "role": current_user.role,
+    }
 
 # ---------- CHAT HISTORY ENDPOINTS ----------
 def ensure_default_session(db: Session, user_id: int) -> ConversationSession:
@@ -133,6 +160,26 @@ def create_session(payload: ChatSessionCreate, current_user: User = Depends(get_
         "message_count": 0,
     }
 
+@app.put("/api/sessions/{session_id}", response_model=ChatSessionResponse)
+def update_session(session_id: int, payload: ChatSessionUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session = (
+        db.query(ConversationSession)
+        .filter(ConversationSession.id == session_id, ConversationSession.user_id == current_user.id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session.title = payload.title.strip() or "New conversation"
+    db.commit()
+    db.refresh(session)
+    return {
+        "id": session.id,
+        "title": session.title,
+        "created_at": session.created_at,
+        "last_message_at": None,
+        "message_count": 0,
+    }
+
 @app.get("/api/sessions/{session_id}/messages", response_model=List[ChatHistoryResponse])
 def get_session_messages(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     session = (
@@ -151,11 +198,11 @@ def get_session_messages(session_id: int, current_user: User = Depends(get_curre
     return messages
 
 @app.post("/api/chat")
-def chat(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def chat(request: ChatRequest, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     session_id = request.session_id
-    if session_id is None:
-        title = request.message.strip()[:40] or "New conversation"
-        session = ConversationSession(user_id=current_user.id, title=title)
+    is_new_session = session_id is None
+    if is_new_session:
+        session = ConversationSession(user_id=current_user.id, title="New conversation")
         db.add(session)
         db.commit()
         db.refresh(session)
@@ -180,8 +227,12 @@ def chat(request: ChatRequest, current_user: User = Depends(get_current_user), d
     db.commit()
     db.refresh(user_msg)
     
-    # Placeholder LLM response (replace with real model later)
-    assistant_reply = f"Echo: {request.message}"
+    # Build context and call LLM
+    try:
+        messages_payload = build_context(db, session_id, request.message)
+        assistant_reply = call_ollama(messages_payload)
+    except OllamaUnavailableError:
+        assistant_reply = "I'm currently unavailable. Please make sure Ollama is running."
     
     # Store assistant response
     assistant_msg = Conversation(
@@ -193,6 +244,15 @@ def chat(request: ChatRequest, current_user: User = Depends(get_current_user), d
     db.add(assistant_msg)
     db.commit()
     db.refresh(assistant_msg)
+
+    # Auto-generate title for new sessions via LLM
+    if is_new_session:
+        background_tasks.add_task(
+            generate_title_from_exchange,
+            session_id,
+            request.message,
+            assistant_reply,
+        )
     
     return {
         "user_message": user_msg.content,
@@ -200,6 +260,33 @@ def chat(request: ChatRequest, current_user: User = Depends(get_current_user), d
         "user_id": current_user.id,
         "session_id": session_id,
     }
+
+
+def generate_title_from_exchange(session_id: int, user_message: str, assistant_message: str) -> None:
+    from database import SessionLocal, ConversationSession
+
+    title = call_ollama([
+        {
+            "role": "system",
+            "content": (
+                "Generate a very short title (max 6 words) for this conversation. "
+                "Return only the title, no quotes or punctuation."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"User: {user_message}\nAssistant: {assistant_message}",
+        },
+    ])
+
+    db = SessionLocal()
+    try:
+        session = db.query(ConversationSession).filter(ConversationSession.id == session_id).first()
+        if session:
+            session.title = title[:120] if title else "New conversation"
+            db.commit()
+    finally:
+        db.close()
 
 @app.delete("/api/history")
 def clear_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

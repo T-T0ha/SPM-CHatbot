@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { register, login } from '../api';
 import '../App.css';
 
@@ -7,6 +8,7 @@ const Auth = ({ onLogin }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -18,9 +20,9 @@ const Auth = ({ onLogin }) => {
       } else {
         response = await register(username, password);
       }
-      const { access_token } = response.data;
-      localStorage.setItem('access_token', access_token);
-      onLogin(access_token);
+      const { access_token, username: returnedUsername } = response.data;
+      onLogin(access_token, returnedUsername);
+      navigate(`/${returnedUsername}`, { replace: true });
     } catch (err) {
       setError(err.response?.data?.detail || 'Authentication failed');
     }
