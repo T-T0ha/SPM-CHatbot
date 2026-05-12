@@ -337,7 +337,7 @@ cd frontend && npm start
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://chatbot_user:chatbot_pass@localhost:5433/chatbot_db` | PostgreSQL connection string |
+| `DATABASE_URL` | `postgresql://chatbot_user:chatbot_pass@localhost:[your_port]/[db_name]` | PostgreSQL connection string |
 | `SECRET_KEY` | `your-secret-key-change-in-production` | JWT signing key |
 | `ALGORITHM` | `HS256` | JWT algorithm |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | JWT token expiry |
